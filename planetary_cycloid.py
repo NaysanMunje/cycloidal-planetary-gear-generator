@@ -197,6 +197,33 @@ def _dxf_pair(code, value) -> str:
     return f"{code}\n{value}\n"
 
 
+def _simplify(points: np.ndarray, tolerance: float) -> np.ndarray:
+    """Douglas–Peucker. Drops points that sit within `tolerance` mm of the chord."""
+    pts = np.asarray(points, dtype=float)
+    if len(pts) < 3:
+        return pts
+    keep = np.zeros(len(pts), dtype=bool)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        start, end = stack.pop()
+        if end <= start + 1:
+            continue
+        chord = pts[end] - pts[start]
+        length = np.hypot(*chord)
+        if length < 1e-12:
+            dist = np.hypot(pts[start + 1:end, 0] - pts[start, 0], pts[start + 1:end, 1] - pts[start, 1])
+        else:
+            rel = pts[start + 1:end] - pts[start]
+            dist = np.abs(chord[0] * rel[:, 1] - chord[1] * rel[:, 0]) / length
+        index = int(np.argmax(dist)) + start + 1
+        if dist[index - start - 1] > tolerance:
+            keep[index] = True
+            stack.append((start, index))
+            stack.append((index, end))
+    return pts[keep]
+
+
 def write_fusion_dxf(path: Path, parts: dict) -> None:
     """AutoCAD R12 DXF, millimetres. Fusion: Insert > Insert DXF."""
     lines: list[str] = []
@@ -204,20 +231,18 @@ def write_fusion_dxf(path: Path, parts: dict) -> None:
     def add(code, value) -> None:
         lines.append(_dxf_pair(code, value))
 
-    def polyline(points: np.ndarray) -> None:
+    def polyline(points: np.ndarray, tolerance: float) -> None:
         pts = np.asarray(points, dtype=float)
         if len(pts) > 1 and np.allclose(pts[0], pts[-1]):
             pts = pts[:-1]
-        # Drop duplicates so Fusion does not reject a zero-length segment.
-        keep = [pts[0]]
-        for point in pts[1:]:
-            if np.hypot(point[0] - keep[-1][0], point[1] - keep[-1][1]) > 1e-6:
-                keep.append(point)
+        pts = _simplify(np.vstack((pts, pts[0])), tolerance)
+        if len(pts) > 1 and np.allclose(pts[0], pts[-1]):
+            pts = pts[:-1]
         add(0, "POLYLINE")
         add(8, "0")
         add(66, 1)
         add(70, 1)
-        for x, y in keep:
+        for x, y in pts:
             add(0, "VERTEX")
             add(8, "0")
             add(10, f"{x:.6f}")
@@ -258,18 +283,20 @@ def write_fusion_dxf(path: Path, parts: dict) -> None:
     add(2, "ENTITIES")
 
     outer = float(radii(parts["ring"]).max())
+    # About 0.2 mm on a 200 mm gear: the sketch follows the lobes without one vertex per sample.
+    tolerance = max(0.05, outer * 0.002)
     add(0, "CIRCLE")
     add(8, "0")
     add(10, "0.0")
     add(20, "0.0")
     add(30, "0.0")
     add(40, f"{outer:.6f}")
-    polyline(parts["ring"])
+    polyline(parts["ring"], tolerance)
     centre_point(0.0, 0.0)
-    polyline(parts["sun"])
+    polyline(parts["sun"], tolerance)
     centre_point(*parts["sun"].mean(axis=0))
     for profile in parts["planets"]:
-        polyline(profile)
+        polyline(profile, tolerance)
         centre_point(*profile.mean(axis=0))
 
     add(0, "ENDSEC")
